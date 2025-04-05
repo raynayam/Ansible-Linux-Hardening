@@ -1,0 +1,500 @@
+---
+# Ansible Playbook for Linux Security Hardening based on CIS Benchmarks
+# Supports Ubuntu 20.04 LTS and CentOS 8
+# Execute with: ansible-playbook -i inventory linux_hardening.yml
+
+- name: Linux Security Hardening
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # General settings
+    backup_dir: "/root/ansible_hardening_backup_{{ ansible_date_time.date }}"
+    
+    # SSH settings
+    ssh_permit_root_login: "no"
+    ssh_protocol: "2"
+    ssh_log_level: "VERBOSE"
+    ssh_max_auth_tries: "4"
+    ssh_client_alive_interval: "300"
+    ssh_client_alive_count_max: "0"
+    ssh_x11_forwarding: "no"
+    ssh_allow_tcp_forwarding: "no"
+    ssh_max_sessions: "2"
+    ssh_ciphers: "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+    ssh_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    
+    # Password policy settings
+    pass_max_days: "90"
+    pass_min_days: "7"
+    pass_warn_age: "14"
+    
+    # Firewall settings
+    firewall_allowed_services:
+      - ssh
+    
+    # Audit rules
+    audit_rules:
+      - '-w /etc/passwd -p wa -k identity'
+      - '-w /etc/group -p wa -k identity'
+      - '-w /etc/shadow -p wa -k identity'
+      - '-w /etc/gshadow -p wa -k identity'
+      - '-w /etc/security/opasswd -p wa -k identity'
+      - '-a always,exit -F arch=b64 -S adjtimex -S settimeofday -S stime -k time-change'
+      - '-a always,exit -F arch=b64 -S clock_settime -k time-change'
+      - '-w /etc/localtime -p wa -k time-change'
+      - '-w /usr/sbin/useradd -p x -k user_modification'
+      - '-w /usr/sbin/userdel -p x -k user_modification'
+      - '-w /usr/sbin/usermod -p x -k user_modification'
+      - '-w /usr/sbin/groupadd -p x -k group_modification'
+      - '-w /usr/sbin/groupdel -p x -k group_modification'
+      - '-w /usr/sbin/groupmod -p x -k group_modification'
+      - '-w /etc/sudoers -p wa -k sudoers'
+      - '-w /etc/sudoers.d/ -p wa -k sudoers'
+      - '-w /var/log/faillog -p wa -k logins'
+      - '-w /var/log/lastlog -p wa -k logins'
+      - '-w /var/log/tallylog -p wa -k logins'
+    
+    # Sysctl parameters
+    sysctl_settings:
+      net.ipv4.ip_forward: 0
+      net.ipv4.conf.all.send_redirects: 0
+      net.ipv4.conf.default.send_redirects: 0
+      net.ipv4.conf.all.accept_source_route: 0
+      net.ipv4.conf.default.accept_source_route: 0
+      net.ipv4.conf.all.accept_redirects: 0
+      net.ipv4.conf.default.accept_redirects: 0
+      net.ipv4.conf.all.secure_redirects: 0
+      net.ipv4.conf.default.secure_redirects: 0
+      net.ipv4.conf.all.log_martians: 1
+      net.ipv4.conf.default.log_martians: 1
+      net.ipv4.icmp_echo_ignore_broadcasts: 1
+      net.ipv4.icmp_ignore_bogus_error_responses: 1
+      net.ipv4.conf.all.rp_filter: 1
+      net.ipv4.conf.default.rp_filter: 1
+      net.ipv4.tcp_syncookies: 1
+      fs.suid_dumpable: 0
+      kernel.randomize_va_space: 2
+  
+  tasks:
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+    
+    # Initial setup tasks
+
+    - name: Detect OS distribution
+      debug:
+        msg: "Detected OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+    
+    - name: Ensure required packages are installed (Ubuntu)
+      apt:
+        name:
+          - auditd
+          - audispd-plugins
+          - chrony
+          - ufw
+          - rsyslog
+          - libpam-pwquality
+        state: present
+        update_cache: yes
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Ensure required packages are installed (CentOS)
+      dnf:
+        name:
+          - audit
+          - audispd-plugins
+          - chrony
+          - firewalld
+          - rsyslog
+          - libpwquality
+          - cronie
+          - dnf-automatic
+        state: present
+        update_cache: yes
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    # 1. Filesystem Configuration
+    
+    - name: Backup fstab
+      copy:
+        src: /etc/fstab
+        dest: "{{ backup_dir }}/fstab.bak"
+        remote_src: yes
+    
+    - name: Disable unused filesystems
+      copy:
+        dest: /etc/modprobe.d/cis_hardening.conf
+        content: |
+          install cramfs /bin/true
+          install freevxfs /bin/true
+          install jffs2 /bin/true
+          install hfs /bin/true
+          install hfsplus /bin/true
+          install squashfs /bin/true
+          install udf /bin/true
+          install vfat /bin/true
+        mode: '0644'
+        owner: root
+        group: root
+    
+    - name: Configure /tmp mount with secure options
+      mount:
+        path: /tmp
+        src: tmpfs
+        fstype: tmpfs
+        opts: defaults,rw,nosuid,nodev,noexec,relatime
+        state: mounted
+      ignore_errors: yes
+    
+    # 1.5 Mandatory Access Control
+    
+    - name: Configure SELinux (CentOS/RHEL)
+      lineinfile:
+        path: /etc/selinux/config
+        regexp: "^SELINUX="
+        line: "SELINUX=enforcing"
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    - name: Configure SELinux type (CentOS/RHEL)
+      lineinfile:
+        path: /etc/selinux/config
+        regexp: "^SELINUXTYPE="
+        line: "SELINUXTYPE=targeted"
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    # 1.7 Warning Banners
+    
+    - name: Configure login warning banner - /etc/issue
+      copy:
+        dest: /etc/issue
+        content: "Authorized uses only. All activity may be monitored and reported.\n"
+        mode: '0644'
+        owner: root
+        group: root
+    
+    - name: Configure login warning banner - /etc/issue.net
+      copy:
+        dest: /etc/issue.net
+        content: "Authorized uses only. All activity may be monitored and reported.\n"
+        mode: '0644'
+        owner: root
+        group: root
+    
+    - name: Configure login warning banner - /etc/motd
+      copy:
+        dest: /etc/motd
+        content: "Authorized uses only. All activity may be monitored and reported.\n"
+        mode: '0644'
+        owner: root
+        group: root
+    
+    # 2. Services
+    
+    # 2.1 Remove legacy services
+    
+    - name: Remove legacy services (Ubuntu)
+      apt:
+        name:
+          - xinetd
+          - telnet
+          - rsh-server
+          - rsh-client
+          - nis
+          - talk
+          - talk-server
+        state: absent
+        purge: yes
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Remove legacy services (CentOS/RHEL)
+      dnf:
+        name:
+          - xinetd
+          - telnet
+          - telnet-server
+          - rsh-server
+          - rsh
+          - ypbind
+          - ypserv
+          - tftp
+          - tftp-server
+          - talk
+          - talk-server
+        state: absent
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    # 2.2 Time Synchronization
+    
+    - name: Configure chrony (Ubuntu)
+      template:
+        src: templates/chrony.conf.j2
+        dest: /etc/chrony/chrony.conf
+        mode: '0644'
+        owner: root
+        group: root
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Configure chrony (CentOS/RHEL)
+      template:
+        src: templates/chrony.conf.j2
+        dest: /etc/chrony.conf
+        mode: '0644'
+        owner: root
+        group: root
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    - name: Enable and start chronyd
+      service:
+        name: "{{ 'chronyd' if ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat' else 'chrony' }}"
+        state: started
+        enabled: yes
+    
+    # 3. Network Configuration
+    
+    # 3.1 Network Parameters
+    
+    - name: Configure sysctl parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_set: yes
+        reload: yes
+      with_dict: "{{ sysctl_settings }}"
+    
+    # 3.2 Configure Firewall
+    
+    - name: Configure UFW (Ubuntu)
+      block:
+        - name: Ensure UFW is installed
+          apt:
+            name: ufw
+            state: present
+          when: ansible_distribution == "Ubuntu"
+        
+        - name: Set UFW default policies
+          ufw:
+            default: deny
+            direction: incoming
+            state: enabled
+          when: ansible_distribution == "Ubuntu"
+        
+        - name: Allow SSH through UFW
+          ufw:
+            rule: allow
+            name: OpenSSH
+          when: ansible_distribution == "Ubuntu"
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Configure firewalld (CentOS/RHEL)
+      block:
+        - name: Ensure firewalld is installed
+          dnf:
+            name: firewalld
+            state: present
+          when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+        
+        - name: Enable and start firewalld
+          service:
+            name: firewalld
+            state: started
+            enabled: yes
+          when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+        
+        - name: Set default zone to public
+          command: firewall-cmd --set-default-zone=public
+          when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+        
+        - name: Allow SSH through firewalld
+          firewalld:
+            service: ssh
+            permanent: yes
+            state: enabled
+          when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+        
+        - name: Reload firewalld
+          command: firewall-cmd --reload
+          when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    # 4. Logging and Auditing
+    
+    # 4.1 Configure audit daemon
+    
+    - name: Configure auditd settings
+      lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: '^max_log_file =', line: 'max_log_file = 10' }
+        - { regexp: '^max_log_file_action', line: 'max_log_file_action = keep_logs' }
+        - { regexp: '^space_left_action', line: 'space_left_action = email' }
+        - { regexp: '^action_mail_acct', line: 'action_mail_acct = root' }
+        - { regexp: '^admin_space_left_action', line: 'admin_space_left_action = halt' }
+    
+    - name: Create audit rules file
+      copy:
+        dest: /etc/audit/rules.d/cis_hardening.rules
+        content: "{{ audit_rules | join('\n') }}\n# Make the configuration immutable\n-e 2"
+        mode: '0640'
+        owner: root
+        group: root
+    
+    - name: Enable and start auditd
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+    
+    # 4.2 Configure logging
+    
+    - name: Enable and start rsyslog
+      service:
+        name: rsyslog
+        state: started
+        enabled: yes
+    
+    # 5. Access, Authentication and Authorization
+    
+    # 5.1 Configure cron
+    
+    - name: Secure crontab file
+      file:
+        path: /etc/crontab
+        mode: '0600'
+        owner: root
+        group: root
+    
+    - name: Secure cron directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+      with_items:
+        - /etc/cron.hourly
+        - /etc/cron.daily
+        - /etc/cron.weekly
+        - /etc/cron.monthly
+        - /etc/cron.d
+    
+    # 5.2 SSH Server Configuration
+    
+    - name: Backup SSH config
+      copy:
+        src: /etc/ssh/sshd_config
+        dest: "{{ backup_dir }}/sshd_config.bak"
+        remote_src: yes
+    
+    - name: Configure SSH settings
+      lineinfile:
+        dest: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      with_items:
+        - { regexp: '^#?Protocol', line: 'Protocol {{ ssh_protocol }}' }
+        - { regexp: '^#?LogLevel', line: 'LogLevel {{ ssh_log_level }}' }
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin {{ ssh_permit_root_login }}' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries {{ ssh_max_auth_tries }}' }
+        - { regexp: '^#?IgnoreRhosts', line: 'IgnoreRhosts yes' }
+        - { regexp: '^#?HostbasedAuthentication', line: 'HostbasedAuthentication no' }
+        - { regexp: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+        - { regexp: '^#?PermitUserEnvironment', line: 'PermitUserEnvironment no' }
+        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval {{ ssh_client_alive_interval }}' }
+        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax {{ ssh_client_alive_count_max }}' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding {{ ssh_x11_forwarding }}' }
+        - { regexp: '^#?AllowTcpForwarding', line: 'AllowTcpForwarding {{ ssh_allow_tcp_forwarding }}' }
+        - { regexp: '^#?MaxSessions', line: 'MaxSessions {{ ssh_max_sessions }}' }
+        - { regexp: '^#?Ciphers', line: 'Ciphers {{ ssh_ciphers }}' }
+        - { regexp: '^#?MACs', line: 'MACs {{ ssh_macs }}' }
+      notify: restart sshd
+    
+    # 5.4 User Accounts and Environment
+    
+    - name: Configure password policies
+      lineinfile:
+        dest: /etc/login.defs
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: '^PASS_MAX_DAYS', line: 'PASS_MAX_DAYS   {{ pass_max_days }}' }
+        - { regexp: '^PASS_MIN_DAYS', line: 'PASS_MIN_DAYS   {{ pass_min_days }}' }
+        - { regexp: '^PASS_WARN_AGE', line: 'PASS_WARN_AGE   {{ pass_warn_age }}' }
+    
+    - name: Set secure UMASK
+      lineinfile:
+        path: /etc/profile
+        regexp: '^umask'
+        line: 'umask 027'
+    
+    # 6. System Maintenance
+    
+    # 6.1 System File Permissions
+    
+    - name: Set secure permissions on sensitive files
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: root
+        group: root
+      with_items:
+        - { path: '/etc/passwd', mode: '0644' }
+        - { path: '/etc/group', mode: '0644' }
+        - { path: '/etc/shadow', mode: '0400' }
+        - { path: '/etc/gshadow', mode: '0400' }
+    
+    # 6.2 Update system
+    
+    - name: Update system packages (Ubuntu)
+      apt:
+        upgrade: dist
+        update_cache: yes
+        autoremove: yes
+      when: ansible_distribution == "Ubuntu"
+    
+    - name: Update system packages (CentOS/RHEL)
+      dnf:
+        name: "*"
+        state: latest
+        update_cache: yes
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+    
+    - name: Configure automatic updates (CentOS/RHEL)
+      block:
+        - name: Install dnf-automatic
+          dnf:
+            name: dnf-automatic
+            state: present
+        
+        - name: Configure dnf-automatic
+          lineinfile:
+            path: /etc/dnf/automatic.conf
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          with_items:
+            - { regexp: '^apply_updates =', line: 'apply_updates = yes' }
+            - { regexp: '^download_updates =', line: 'download_updates = yes' }
+            - { regexp: '^emit_via =', line: 'emit_via = email' }
+        
+        - name: Enable dnf-automatic timer
+          systemd:
+            name: dnf-automatic.timer
+            state: started
+            enabled: yes
+      when: ansible_distribution == "CentOS" or ansible_distribution == "RedHat"
+  
+  handlers:
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted 
