@@ -1,0 +1,29 @@
+{% if ansible_distribution == 'Ubuntu' %}
+# Use Ubuntu NTP servers
+pool ntp.ubuntu.com iburst maxsources 4
+{% elif ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat' %}
+# Use CentOS NTP servers
+server 0.centos.pool.ntp.org iburst
+server 1.centos.pool.ntp.org iburst
+server 2.centos.pool.ntp.org iburst
+server 3.centos.pool.ntp.org iburst
+{% else %}
+# Use generic NTP servers
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+server 2.pool.ntp.org iburst
+server 3.pool.ntp.org iburst
+{% endif %}
+
+# Record the rate at which the system clock gains/losses time.
+driftfile /var/lib/chrony/drift
+
+# Allow the system clock to be stepped in the first three updates
+# if its offset is larger than 1 second.
+makestep 1.0 3
+
+# Enable kernel synchronization of the real-time clock (RTC).
+rtcsync
+
+# Specify directory for log files.
+logdir /var/log/chrony 
